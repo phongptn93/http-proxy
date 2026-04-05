@@ -1,0 +1,13 @@
+{
+  "listen_addr": ":8080",
+  "admin_addr": ":8081",
+  "enable_mitm": true,
+  "ca_key_file": "certs/ca.key",
+  "ca_cert_file": "certs/ca.crt",
+  "log_dir": "logs",
+  "log_max_size_mb": 100,
+  "log_max_backups": 10,
+  "log_body_limit": 65536,
+  "log_format": "json",
+  "blocked_hosts": []
+}

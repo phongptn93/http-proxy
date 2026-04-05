@@ -1,0 +1,19 @@
+# Build output
+/http-proxy
+/proxy
+
+# Certificates (generated)
+/certs/
+
+# Logs
+/logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
