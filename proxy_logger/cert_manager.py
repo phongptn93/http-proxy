@@ -1,15 +1,27 @@
+import hashlib
 import os
+import random
 import ssl
-import subprocess
-import tempfile
+import struct
+import textwrap
+import time
+from base64 import b64encode
 from pathlib import Path
 from threading import Lock
+
+from .asn1 import (
+    build_ca_certificate,
+    build_host_certificate,
+    generate_ec_key,
+    private_key_to_pem,
+    public_key_from_private,
+)
 
 
 class CertManager:
     """Manages CA certificate and per-host certificate generation for MITM.
 
-    Uses OpenSSL CLI for certificate generation (no external Python packages needed).
+    Pure Python implementation - no external dependencies required.
     """
 
     def __init__(self, ca_dir: str = "certs"):
@@ -22,30 +34,44 @@ class CertManager:
         self._lock = Lock()
         self._cache: dict[str, tuple[str, str]] = {}
 
-        if not (self.ca_cert_path.exists() and self.ca_key_path.exists()):
+        if self.ca_cert_path.exists() and self.ca_key_path.exists():
+            self._load_ca()
+        else:
             self._generate_ca()
 
-    def _generate_ca(self):
-        """Generate a self-signed CA certificate using OpenSSL."""
-        subprocess.run(
-            [
-                "openssl", "ecparam", "-genkey", "-name", "prime256v1",
-                "-out", str(self.ca_key_path),
-            ],
-            check=True, capture_output=True,
-        )
-        os.chmod(self.ca_key_path, 0o600)
+    def _load_ca(self):
+        """Load existing CA cert and key from PEM files."""
+        from .asn1 import load_ec_private_key, load_certificate_der
 
-        subprocess.run(
-            [
-                "openssl", "req", "-new", "-x509",
-                "-key", str(self.ca_key_path),
-                "-out", str(self.ca_cert_path),
-                "-days", "3650",
-                "-subj", "/O=HTTP Proxy Logger/CN=HTTP Proxy Logger CA",
-            ],
-            check=True, capture_output=True,
-        )
+        key_pem = self.ca_key_path.read_text()
+        cert_pem = self.ca_cert_path.read_text()
+
+        self._ca_private_key = load_ec_private_key(key_pem)
+        self._ca_cert_der = load_certificate_der(cert_pem)
+        self._ca_cert_pem = cert_pem.encode()
+
+    def _generate_ca(self):
+        """Generate a new self-signed CA certificate."""
+        private_key = generate_ec_key()
+        public_key = public_key_from_private(private_key)
+
+        cert_der = build_ca_certificate(private_key, public_key)
+
+        # Save cert PEM
+        cert_pem = der_to_pem(cert_der, "CERTIFICATE")
+        self.ca_cert_path.write_text(cert_pem)
+
+        # Save key PEM
+        key_pem = private_key_to_pem(private_key)
+        self.ca_key_path.write_text(key_pem)
+        try:
+            os.chmod(self.ca_key_path, 0o600)
+        except OSError:
+            pass  # Windows may not support chmod
+
+        self._ca_private_key = private_key
+        self._ca_cert_der = cert_der
+        self._ca_cert_pem = cert_pem.encode()
 
     def get_cert_for_host(self, hostname: str) -> tuple[str, str]:
         """Returns (cert_path, key_path) for the given hostname."""
@@ -63,57 +89,25 @@ class CertManager:
         host_dir.mkdir(exist_ok=True)
 
         safe_name = hostname.replace("*", "_wildcard_").replace(":", "_")
-        key_path = host_dir / f"{safe_name}.key"
-        csr_path = host_dir / f"{safe_name}.csr"
-        cert_path = host_dir / f"{safe_name}.crt"
-        ext_path = host_dir / f"{safe_name}.ext"
+        cert_file = host_dir / f"{safe_name}.crt"
+        key_file = host_dir / f"{safe_name}.key"
 
-        # Generate host key
-        subprocess.run(
-            ["openssl", "ecparam", "-genkey", "-name", "prime256v1", "-out", str(key_path)],
-            check=True, capture_output=True,
+        # Generate host key pair
+        host_private_key = generate_ec_key()
+        host_public_key = public_key_from_private(host_private_key)
+
+        # Build and sign certificate
+        cert_der = build_host_certificate(
+            hostname=hostname,
+            host_public_key=host_public_key,
+            ca_private_key=self._ca_private_key,
+            ca_cert_der=self._ca_cert_der,
         )
 
-        # Generate CSR
-        subprocess.run(
-            [
-                "openssl", "req", "-new",
-                "-key", str(key_path),
-                "-out", str(csr_path),
-                "-subj", f"/O=HTTP Proxy Logger/CN={hostname}",
-            ],
-            check=True, capture_output=True,
-        )
+        cert_file.write_text(der_to_pem(cert_der, "CERTIFICATE"))
+        key_file.write_text(private_key_to_pem(host_private_key))
 
-        # Write SAN extension file
-        ext_path.write_text(
-            f"authorityKeyIdentifier=keyid,issuer\n"
-            f"basicConstraints=CA:FALSE\n"
-            f"keyUsage=digitalSignature,keyEncipherment\n"
-            f"extendedKeyUsage=serverAuth\n"
-            f"subjectAltName=DNS:{hostname}\n"
-        )
-
-        # Sign with CA
-        subprocess.run(
-            [
-                "openssl", "x509", "-req",
-                "-in", str(csr_path),
-                "-CA", str(self.ca_cert_path),
-                "-CAkey", str(self.ca_key_path),
-                "-CAcreateserial",
-                "-out", str(cert_path),
-                "-days", "1",
-                "-extfile", str(ext_path),
-            ],
-            check=True, capture_output=True,
-        )
-
-        # Clean up temp files
-        csr_path.unlink(missing_ok=True)
-        ext_path.unlink(missing_ok=True)
-
-        return str(cert_path), str(key_path)
+        return str(cert_file), str(key_file)
 
     def get_ssl_context(self, hostname: str) -> ssl.SSLContext:
         """Get an SSL context configured for the given hostname."""
@@ -124,4 +118,10 @@ class CertManager:
 
     @property
     def ca_cert_pem(self) -> bytes:
-        return self.ca_cert_path.read_bytes()
+        return self._ca_cert_pem
+
+
+def der_to_pem(der_data: bytes, label: str) -> str:
+    b64 = b64encode(der_data).decode("ascii")
+    lines = textwrap.wrap(b64, 64)
+    return f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----\n"
