@@ -1,9 +1,9 @@
 {
-  "listen_addr": ":8080",
-  "admin_addr": ":8081",
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080,
+  "admin_port": 8081,
   "enable_mitm": true,
-  "ca_key_file": "certs/ca.key",
-  "ca_cert_file": "certs/ca.crt",
+  "ca_dir": "certs",
   "log_dir": "logs",
   "log_max_size_mb": 100,
   "log_max_backups": 10,

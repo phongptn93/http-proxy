@@ -1,6 +1,11 @@
-# Build output
-/http-proxy
-/proxy
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
 
 # Certificates (generated)
 /certs/
