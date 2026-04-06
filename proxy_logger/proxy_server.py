@@ -1,5 +1,6 @@
 import http.client
 import logging
+import re
 import select
 import socket
 import ssl
@@ -164,6 +165,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             url = f"https://{host}{path}"
 
+            _print_take_answers(url, method, headers.get("Content-Type", ""), req_body)
+
             entry = LogEntry(
                 id=_gen_id(), timestamp=_now(), client_addr=self.client_address[0],
                 method=method, url=url, host=host,
@@ -271,6 +274,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             entry.request_size = len(req_body)
             if req_body:
                 entry.request_body = _safe_body(req_body, self.config.log_body_limit)
+
+            _print_take_answers(self.path, self.command, self.headers.get("Content-Type", ""), req_body)
 
             try:
                 conn = http.client.HTTPConnection(host, port, timeout=30)
@@ -395,6 +400,58 @@ class ThreadedProxyServer(HTTPServer):
 
 
 # ----- Utility functions -----
+
+def _parse_take_answers(content_type: str, body: bytes) -> dict[int, str]:
+    """Parse take_info[N][correct] values from multipart form-data body.
+
+    Returns a mapping of question index -> correct answer value.
+    """
+    if not content_type or "multipart/form-data" not in content_type:
+        return {}
+
+    boundary_match = re.search(r"boundary=([^\s;]+)", content_type)
+    if not boundary_match:
+        return {}
+
+    boundary = boundary_match.group(1).strip('"')
+    delimiter = f"--{boundary}".encode()
+
+    answers: dict[int, str] = {}
+    for part in body.split(delimiter):
+        if not part or part.startswith(b"--"):
+            continue
+        if b"\r\n\r\n" not in part:
+            continue
+
+        headers_raw, value = part.split(b"\r\n\r\n", 1)
+        headers_str = headers_raw.decode("utf-8", errors="replace")
+
+        name_match = re.search(r'name="([^"]+)"', headers_str)
+        if not name_match:
+            continue
+
+        name = name_match.group(1)
+        correct_match = re.match(r"take_info\[(\d+)\]\[correct\]$", name)
+        if correct_match:
+            idx = int(correct_match.group(1))
+            answers[idx] = value.rstrip(b"\r\n").decode("utf-8", errors="replace")
+
+    return answers
+
+
+def _print_take_answers(url: str, method: str, content_type: str, body: bytes) -> None:
+    """If the request is a save-take POST, print correct answers to console."""
+    if method != "POST" or "save-take" not in url:
+        return
+
+    answers = _parse_take_answers(content_type, body)
+    if not answers:
+        return
+
+    log.info(f"[save-take] {url}")
+    for idx in sorted(answers):
+        log.info(f"  Câu {idx + 1}: Đáp án {answers[idx]}")
+
 
 def _gen_id() -> str:
     return uuid.uuid4().hex[:16]
