@@ -448,9 +448,10 @@ def _print_take_answers(url: str, method: str, content_type: str, body: bytes) -
     if not answers:
         return
 
-    log.info(f"[save-take] {url}")
+    print(f"\n[save-take] {url}", flush=True)
     for idx in sorted(answers):
-        log.info(f"  Câu {idx + 1}: Đáp án {answers[idx]}")
+        print(f"  Câu {idx + 1}: Đáp án {answers[idx]}", flush=True)
+    print("", flush=True)
 
 
 def _gen_id() -> str:
