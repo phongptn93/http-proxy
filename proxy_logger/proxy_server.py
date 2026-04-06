@@ -1,5 +1,6 @@
 import http.client
 import logging
+import re
 import select
 import socket
 import ssl
@@ -150,9 +151,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     k, v = line_str.split(":", 1)
                     headers[k.strip()] = v.strip()
 
-            # Read body if Content-Length present
+            # Read body
             req_body = b""
             content_length = int(headers.get("Content-Length", 0))
+            transfer_encoding = headers.get("Transfer-Encoding", "").lower()
             if content_length > 0:
                 remaining = content_length
                 while remaining > 0:
@@ -161,8 +163,37 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         break
                     req_body += chunk
                     remaining -= len(chunk)
+            elif "chunked" in transfer_encoding:
+                while True:
+                    # Read chunk size line
+                    size_line = b""
+                    while True:
+                        byte = client_ssl.recv(1)
+                        if not byte:
+                            break
+                        size_line += byte
+                        if size_line.endswith(b"\r\n"):
+                            break
+                    try:
+                        chunk_size = int(size_line.strip().split(b";")[0], 16)
+                    except ValueError:
+                        break
+                    if chunk_size == 0:
+                        # consume trailing CRLF
+                        client_ssl.recv(2)
+                        break
+                    data = b""
+                    while len(data) < chunk_size:
+                        piece = client_ssl.recv(chunk_size - len(data))
+                        if not piece:
+                            break
+                        data += piece
+                    req_body += data
+                    client_ssl.recv(2)  # trailing CRLF after chunk data
 
             url = f"https://{host}{path}"
+
+            _print_take_answers(url, method, headers.get("Content-Type", ""), req_body)
 
             entry = LogEntry(
                 id=_gen_id(), timestamp=_now(), client_addr=self.client_address[0],
@@ -271,6 +302,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             entry.request_size = len(req_body)
             if req_body:
                 entry.request_body = _safe_body(req_body, self.config.log_body_limit)
+
+            _print_take_answers(self.path, self.command, self.headers.get("Content-Type", ""), req_body)
 
             try:
                 conn = http.client.HTTPConnection(host, port, timeout=30)
@@ -395,6 +428,89 @@ class ThreadedProxyServer(HTTPServer):
 
 
 # ----- Utility functions -----
+
+def _parse_take_answers(content_type: str, body: bytes) -> dict[int, str]:
+    """Parse take_info[N][correct] values from the request body.
+
+    Supports multipart/form-data and application/x-www-form-urlencoded.
+    Returns a mapping of question index -> correct answer value.
+    """
+    if not content_type or not body:
+        return {}
+
+    answers: dict[int, str] = {}
+
+    if "multipart/form-data" in content_type:
+        boundary_match = re.search(r"boundary=([^\s;]+)", content_type)
+        if not boundary_match:
+            return {}
+
+        boundary = boundary_match.group(1).strip('"')
+        delimiter = f"--{boundary}".encode()
+
+        for part in body.split(delimiter):
+            if not part or part.startswith(b"--"):
+                continue
+            if b"\r\n\r\n" not in part:
+                continue
+
+            headers_raw, value = part.split(b"\r\n\r\n", 1)
+            headers_str = headers_raw.decode("utf-8", errors="replace")
+
+            name_match = re.search(r'name="([^"]+)"', headers_str)
+            if not name_match:
+                continue
+
+            name = name_match.group(1)
+            correct_match = re.match(r"take_info\[(\d+)\]\[correct\]$", name)
+            if correct_match:
+                idx = int(correct_match.group(1))
+                answers[idx] = value.rstrip(b"\r\n").decode("utf-8", errors="replace")
+
+    elif "application/x-www-form-urlencoded" in content_type:
+        from urllib.parse import parse_qs
+        try:
+            params = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        except Exception:
+            return {}
+        for key, values in params.items():
+            correct_match = re.match(r"take_info\[(\d+)\]\[correct\]$", key)
+            if correct_match:
+                idx = int(correct_match.group(1))
+                answers[idx] = values[0] if values else ""
+
+    return answers
+
+
+def _print_take_answers(url: str, method: str, content_type: str, body: bytes) -> None:
+    """Print POST requests to console to help identify the answer-submit endpoint."""
+    if method != "POST":
+        return
+
+    # Always show every POST so the real URL is visible
+    print(f"[POST] {url}  ({len(body)}B  {content_type or 'no-ct'})", flush=True)
+
+    if "save-take" not in url:
+        return
+
+    # Detailed dump for save-take hits
+    print(f"\n>>> [save-take] {url}", flush=True)
+    print(f"    Content-Type : {content_type or '(none)'}", flush=True)
+    print(f"    Body size    : {len(body)} bytes", flush=True)
+
+    # Raw body preview – helps identify real field names
+    if body:
+        preview = body[:500].decode("utf-8", errors="replace").replace("\r\n", " | ").replace("\n", " | ")
+        print(f"    Body preview : {preview}", flush=True)
+
+    answers = _parse_take_answers(content_type, body)
+    if not answers:
+        print("    (no answers parsed – field names or Content-Type may differ from expected)", flush=True)
+    else:
+        for idx in sorted(answers):
+            print(f"    Câu {idx + 1}: Đáp án {answers[idx]}", flush=True)
+    print("", flush=True)
+
 
 def _gen_id() -> str:
     return uuid.uuid4().hex[:16]
