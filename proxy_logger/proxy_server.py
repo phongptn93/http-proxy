@@ -483,20 +483,32 @@ def _parse_take_answers(content_type: str, body: bytes) -> dict[int, str]:
 
 
 def _print_take_answers(url: str, method: str, content_type: str, body: bytes) -> None:
-    """If the request is a save-take POST, print correct answers to console."""
-    if method != "POST" or "save-take" not in url:
+    """Print POST requests to console to help identify the answer-submit endpoint."""
+    if method != "POST":
         return
 
-    print(f"\n[save-take] {url}", flush=True)
-    print(f"  Content-Type : {content_type or '(none)'}", flush=True)
-    print(f"  Body size    : {len(body)} bytes", flush=True)
+    # Always show every POST so the real URL is visible
+    print(f"[POST] {url}  ({len(body)}B  {content_type or 'no-ct'})", flush=True)
+
+    if "save-take" not in url:
+        return
+
+    # Detailed dump for save-take hits
+    print(f"\n>>> [save-take] {url}", flush=True)
+    print(f"    Content-Type : {content_type or '(none)'}", flush=True)
+    print(f"    Body size    : {len(body)} bytes", flush=True)
+
+    # Raw body preview – helps identify real field names
+    if body:
+        preview = body[:500].decode("utf-8", errors="replace").replace("\r\n", " | ").replace("\n", " | ")
+        print(f"    Body preview : {preview}", flush=True)
 
     answers = _parse_take_answers(content_type, body)
     if not answers:
-        print("  (no answers parsed – check Content-Type and field names above)", flush=True)
+        print("    (no answers parsed – field names or Content-Type may differ from expected)", flush=True)
     else:
         for idx in sorted(answers):
-            print(f"  Câu {idx + 1}: Đáp án {answers[idx]}", flush=True)
+            print(f"    Câu {idx + 1}: Đáp án {answers[idx]}", flush=True)
     print("", flush=True)
 
 
